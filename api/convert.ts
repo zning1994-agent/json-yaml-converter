@@ -7,6 +7,77 @@ const corsMiddleware = Cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 });
 
+interface RateLimitConfig {
+  windowMs: number;
+  maxRequests: number;
+}
+
+interface RateLimitEntry {
+  count: number;
+  resetTime: number;
+}
+
+const RATE_LIMIT_CONFIG: RateLimitConfig = {
+  windowMs: 60 * 1000,
+  maxRequests: 100,
+};
+
+const rateLimitStore: Map<string, RateLimitEntry> = new Map();
+
+function cleanupExpiredEntries(): void {
+  const now = Date.now();
+  for (const [key, entry] of rateLimitStore.entries()) {
+    if (entry.resetTime <= now) {
+      rateLimitStore.delete(key);
+    }
+  }
+}
+
+function getRateLimitKey(req: VercelRequest): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  const ip = typeof forwarded === 'string' 
+    ? forwarded.split(',')[0].trim() 
+    : req.headers['x-real-ip'] || req.socket.remoteAddress || 'unknown';
+  return `rate_limit:${ip}`;
+}
+
+function checkRateLimit(req: VercelRequest): { allowed: boolean; remaining: number; resetIn: number } {
+  cleanupExpiredEntries();
+  
+  const key = getRateLimitKey(req);
+  const now = Date.now();
+  const entry = rateLimitStore.get(key);
+  
+  if (!entry || entry.resetTime <= now) {
+    rateLimitStore.set(key, {
+      count: 1,
+      resetTime: now + RATE_LIMIT_CONFIG.windowMs,
+    });
+    return { allowed: true, remaining: RATE_LIMIT_CONFIG.maxRequests - 1, resetIn: RATE_LIMIT_CONFIG.windowMs };
+  }
+  
+  if (entry.count >= RATE_LIMIT_CONFIG.maxRequests) {
+    return { allowed: false, remaining: 0, resetIn: entry.resetTime - now };
+  }
+  
+  entry.count++;
+  return { 
+    allowed: true, 
+    remaining: RATE_LIMIT_CONFIG.maxRequests - entry.count, 
+    resetIn: entry.resetTime - now 
+  };
+}
+
+function setRateLimitHeaders(
+  res: VercelResponse,
+  remaining: number,
+  resetIn: number
+): void {
+  res.setHeader('X-RateLimit-Limit', RATE_LIMIT_CONFIG.maxRequests.toString());
+  res.setHeader('X-RateLimit-Remaining', remaining.toString());
+  res.setHeader('X-RateLimit-Reset', (Date.now() + resetIn).toString());
+}
+
 interface ConversionRequest {
   input: string;
   inputFormat: 'json' | 'yaml';
@@ -126,6 +197,18 @@ export default async function handler(
 
     if (req.method === 'OPTIONS') {
       res.status(200).end();
+      return;
+    }
+
+    const rateLimitResult = checkRateLimit(req);
+    setRateLimitHeaders(res, rateLimitResult.remaining, rateLimitResult.resetIn);
+
+    if (!rateLimitResult.allowed) {
+      res.status(429).json({
+        success: false,
+        error: 'Too many requests. Please try again later.',
+        retryAfter: Math.ceil(rateLimitResult.resetIn / 1000),
+      } as ConversionResponse & { retryAfter: number });
       return;
     }
 
