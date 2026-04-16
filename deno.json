@@ -1,0 +1,10 @@
+{
+  "imports": {
+    "std/http": "https://deno.land/std@0.168.0/http/server.ts",
+    "cors": "https://deno.land/x/cors@v1.2.2/mod.ts"
+  },
+  "tasks": {
+    "start": "deno run --allow-net --allow-read api/deploy.ts",
+    "deploy": "deployctl deploy --project=json-yaml-converter api/deploy.ts"
+  }
+}
